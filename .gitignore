@@ -1,0 +1,9 @@
+.browser-profile/
+__pycache__/
+*.pyc
+
+downloads/
+downloads_g1/
+downloads_g3/
+state/
+last_fetch.log
