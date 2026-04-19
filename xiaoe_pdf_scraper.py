@@ -394,7 +394,8 @@ class Collector:
     def __init__(self, tag_url: str) -> None:
         self.tag_url = tag_url
         self.pdfs: dict[str, dict[str, Any]] = {}
-        self.detail_links: set[str] = set()
+        self.detail_links: list[str] = []
+        self.seen_detail_links: set[str] = set()
         self.seen_response_urls: set[str] = set()
 
     def add_pdf(
@@ -426,8 +427,9 @@ class Collector:
         if not looks_like_detail_link(value):
             return
         url = join_url(base_url, value)
-        if "/feed_detail" in url.lower():
-            self.detail_links.add(url)
+        if "/feed_detail" in url.lower() and url not in self.seen_detail_links:
+            self.seen_detail_links.add(url)
+            self.detail_links.append(url)
 
     def scan_payload(self, payload: Any, *, base_url: str, response_url: str, page_url: str) -> None:
         self._scan_any(payload, base_url=base_url, response_url=response_url, page_url=page_url, stack=[])
@@ -445,7 +447,10 @@ class Collector:
             current_stack = stack + [value]
             feed_id = value.get("feeds_id") or value.get("feed_id")
             if isinstance(feed_id, (str, int)) and str(feed_id).strip():
-                self.detail_links.add(build_detail_url(self.tag_url, str(feed_id).strip()))
+                detail_url = build_detail_url(self.tag_url, str(feed_id).strip())
+                if detail_url not in self.seen_detail_links:
+                    self.seen_detail_links.add(detail_url)
+                    self.detail_links.append(detail_url)
             for field in URL_FIELDS:
                 field_value = value.get(field)
                 if isinstance(field_value, str):
@@ -610,6 +615,49 @@ def save_manifest(manifest_path: Path, manifest: dict[str, Any]) -> None:
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def find_existing_download(
+    record: dict[str, Any],
+    output_dir: Path,
+    manifest: dict[str, Any],
+) -> tuple[bool, list[str], Path | None]:
+    reasons: list[str] = []
+    filename = record["filename"]
+    output_path = output_dir / filename
+    existing_path: Path | None = None
+    if output_path.exists() and output_path.stat().st_size > 0:
+        reasons.append("目录文件")
+        existing_path = output_path
+
+    manifest_item = manifest["items"].get(record["canonical_url"])
+    if manifest_item:
+        saved_path_value = manifest_item.get("saved_path")
+        if saved_path_value:
+            saved_path = Path(saved_path_value)
+            if saved_path.exists() and saved_path.stat().st_size > 0:
+                reasons.append("manifest")
+                if existing_path is None:
+                    existing_path = saved_path
+
+    if not reasons:
+        for manifest_item in manifest["items"].values():
+            if manifest_item.get("filename") != filename:
+                continue
+            saved_path_value = manifest_item.get("saved_path")
+            if not saved_path_value:
+                continue
+            saved_path = Path(saved_path_value)
+            if saved_path.exists() and saved_path.stat().st_size > 0:
+                reasons.append("manifest")
+                existing_path = existing_path or saved_path
+                break
+
+    if reasons:
+        # 去重并保序，避免同时命中时重复输出
+        deduped_reasons = list(dict.fromkeys(reasons))
+        return True, deduped_reasons, existing_path
+    return False, [], None
+
+
 def unique_target_path(output_dir: Path, desired_name: str, manifest: dict[str, Any], canonical_url: str) -> Path:
     existing = manifest["items"].get(canonical_url)
     if existing and existing.get("saved_path"):
@@ -659,7 +707,7 @@ def run_fetch(
     storage_state_path: Path,
     chrome_path: str,
     max_details: int | None,
-    stats_only: bool,
+    stop_on_first_downloaded: bool,
 ) -> int:
     collector = Collector(tag_url)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -684,7 +732,7 @@ def run_fetch(
                 return 1
         visit_page(page, tag_url, collector, scroll=True)
 
-        detail_links = sorted(collector.detail_links)
+        detail_links = list(collector.detail_links)
         if max_details is not None:
             detail_links = detail_links[:max_details]
         print(f"已发现 {len(detail_links)} 个详情页，开始补抓。")
@@ -695,22 +743,31 @@ def run_fetch(
 
         filtered_records = [record for record in collector.pdfs.values() if is_target_math_pdf(record)]
         print(f"共发现 {len(collector.pdfs)} 个 PDF 候选，其中数学试卷/答案 {len(filtered_records)} 个。")
-        if stats_only:
-            return 0
 
-        print("开始下载数学试卷/答案。")
+        print(f"开始下载数学试卷/答案。增量停止模式: {'开启' if stop_on_first_downloaded else '关闭'}")
+        downloaded_count = 0
+        stopped_early = False
         for index, record in enumerate(filtered_records, start=1):
-            target_path = unique_target_path(output_dir, record["filename"], manifest, record["canonical_url"])
-            if target_path.exists() and target_path.stat().st_size > 0:
+            already_downloaded, reasons, existing_path = find_existing_download(record, output_dir, manifest)
+            if already_downloaded:
+                if stop_on_first_downloaded:
+                    print(
+                        f"[{index}/{len(filtered_records)}] 命中已下载文件并停止: {record['filename']} "
+                        f"(来源: {'/'.join(reasons)})"
+                    )
+                    stopped_early = True
+                    break
+                target_path = existing_path or (output_dir / record["filename"])
                 manifest["items"][record["canonical_url"]] = {
                     **record,
                     "saved_path": str(target_path),
-                    "size": target_path.stat().st_size,
+                    "size": target_path.stat().st_size if target_path.exists() else 0,
                     "downloaded_at": int(time.time()),
                 }
                 print(f"[{index}/{len(filtered_records)}] 跳过已存在: {target_path.name}")
                 continue
 
+            target_path = unique_target_path(output_dir, record["filename"], manifest, record["canonical_url"])
             print(f"[{index}/{len(filtered_records)}] 下载: {target_path.name}")
             status, size = download_file(record["url"], target_path, referer=record.get("page_url") or tag_url)
             manifest["items"][record["canonical_url"]] = {
@@ -720,8 +777,13 @@ def run_fetch(
                 "size": size,
                 "downloaded_at": int(time.time()),
             }
+            downloaded_count += 1
             save_manifest(manifest_path, manifest)
         save_manifest(manifest_path, manifest)
+        print(
+            f"下载完成。新增下载 {downloaded_count} 个。"
+            f"{' 已因命中首个已下载文件而提前停止。' if stopped_early else ''}"
+        )
         return 0
     finally:
         close_context(context)
@@ -743,7 +805,19 @@ def build_parser() -> argparse.ArgumentParser:
     fetch_parser.add_argument("--storage-state", default="state/storage_state.json", help="storage_state.json 路径。")
     fetch_parser.add_argument("--chrome-path", default=None, help="显式指定 chrome.exe 路径。")
     fetch_parser.add_argument("--max-details", type=int, default=None, help="仅处理前 N 个详情页。")
-    fetch_parser.add_argument("--stats-only", action="store_true", help="只统计详情页和 PDF 候选数量，不下载。")
+    fetch_parser.add_argument(
+        "--stop-on-first-downloaded",
+        dest="stop_on_first_downloaded",
+        action="store_true",
+        default=True,
+        help="遇到首个已下载数学文件时立即停止，默认开启。",
+    )
+    fetch_parser.add_argument(
+        "--no-stop-on-first-downloaded",
+        dest="stop_on_first_downloaded",
+        action="store_false",
+        help="关闭增量停止模式，重复文件仅跳过不停止。",
+    )
     return parser
 
 
@@ -765,7 +839,7 @@ def main() -> int:
             storage_state_path=Path(args.storage_state).resolve(),
             chrome_path=chrome_path,
             max_details=args.max_details,
-            stats_only=args.stats_only,
+            stop_on_first_downloaded=args.stop_on_first_downloaded,
         )
     except KeyboardInterrupt:
         print("用户中断。")

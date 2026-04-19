@@ -8,7 +8,7 @@
 - 支持先登录再抓取，避免每次重新扫码
 - 支持更换抓取地址，不需要改代码
 - 只下载数学试卷和数学答案，过滤掉其他学科
-- 支持先做统计，再决定是否全量下载
+- 默认支持增量下载，遇到首个已下载数学文件就自动停止
 - 下载结果带 `manifest.json`，便于去重和断点续跑
 
 ## 项目结构
@@ -96,15 +96,23 @@ python .\xiaoe_pdf_scraper.py fetch `
   --chrome-path "C:\Users\洛畔\AppData\Local\Google\Chrome\Application\chrome.exe"
 ```
 
-## 只做统计，不下载
+## 增量下载模式
 
-如果你想先确认一共能访问多少详情页、多少数学 PDF 候选，可以先跑：
+`fetch` 默认开启增量下载模式：
+
+- 脚本按页面发现顺序处理数学试卷/数学答案
+- 一旦遇到首个“已下载过”的数学 PDF，就立即停止后续下载
+- “已下载过”的判定同时参考：
+  - `downloads/` 目录里是否已有同名文件
+  - `manifest.json` 里是否已有有效记录
+
+如果你需要重新全量扫描并跳过重复文件，而不是遇到首个重复就停，可以使用：
 
 ```powershell
 python .\xiaoe_pdf_scraper.py fetch `
   --crawl-url "你的标签页地址" `
   --chrome-path "C:\Users\洛畔\AppData\Local\Google\Chrome\Application\chrome.exe" `
-  --stats-only
+  --no-stop-on-first-downloaded
 ```
 
 ## 调试时只抓前 N 个详情页
@@ -184,15 +192,6 @@ python .\xiaoe_pdf_scraper.py login `
   --chrome-path "C:\Users\洛畔\AppData\Local\Google\Chrome\Application\chrome.exe"
 ```
 
-统计：
-
-```powershell
-python .\xiaoe_pdf_scraper.py fetch `
-  --crawl-url "抓取页地址" `
-  --chrome-path "C:\Users\洛畔\AppData\Local\Google\Chrome\Application\chrome.exe" `
-  --stats-only
-```
-
 下载：
 
 ```powershell
@@ -200,4 +199,13 @@ python .\xiaoe_pdf_scraper.py fetch `
   --crawl-url "抓取页地址" `
   --chrome-path "C:\Users\洛畔\AppData\Local\Google\Chrome\Application\chrome.exe" `
   --output-dir "D:\code\mathpaperScraper\downloads"
+```
+
+全量重扫但不提前停止：
+
+```powershell
+python .\xiaoe_pdf_scraper.py fetch `
+  --crawl-url "抓取页地址" `
+  --chrome-path "C:\Users\洛畔\AppData\Local\Google\Chrome\Application\chrome.exe" `
+  --no-stop-on-first-downloaded
 ```

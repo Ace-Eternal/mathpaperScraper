@@ -40,6 +40,12 @@ python .\xiaoe_pdf_scraper.py fetch `
   --chrome-path "C:\Users\洛畔\AppData\Local\Google\Chrome\Application\chrome.exe"
 ```
 
+默认会开启增量下载模式：
+
+- 按页面发现顺序处理数学试卷和数学答案
+- 一旦遇到首个已下载文件就自动停止
+- “已下载”同时看 `downloads/` 目录和 `manifest.json`
+
 或者直接使用参考项目的登录态：
 
 ```powershell
@@ -63,4 +69,13 @@ python .\xiaoe_pdf_scraper.py fetch `
   --crawl-url "你的新标签页地址" `
   --chrome-path "C:\Users\洛畔\AppData\Local\Google\Chrome\Application\chrome.exe" `
   --max-details 5
+```
+
+如果你想关闭这个“遇到首个已下载就停止”的行为，改成全量重扫，可以加：
+
+```powershell
+python .\xiaoe_pdf_scraper.py fetch `
+  --crawl-url "你的新标签页地址" `
+  --chrome-path "C:\Users\洛畔\AppData\Local\Google\Chrome\Application\chrome.exe" `
+  --no-stop-on-first-downloaded
 ```
